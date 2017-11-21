@@ -17,7 +17,7 @@ def build_mlp(
         output_size,
         scope, 
         n_layers=2, 
-        size=64, 
+        size=64,
         activation=tf.tanh,
         output_activation=None
         ):
@@ -34,8 +34,11 @@ def build_mlp(
     #========================================================================================#
 
     with tf.variable_scope(scope):
-        # YOUR_CODE_HERE
-        pass
+        input_layer = tf.layers.dense(input_placeholder, size, activation = activation)
+        curr = input_layer
+        for hidden_layer_i in range(n_layers):
+            curr = tf.layers.dense(curr, size, activation = activation)
+        return tf.layers.dense(curr, output_size, activation = output_activation)
 
 def pathlength(path):
     return len(path["reward"])
@@ -87,6 +90,7 @@ def train_PG(exp_name='',
 
     # Maximum length for episodes
     max_path_length = max_path_length or env.spec.max_episode_steps
+    print(max_path_length)
 
     #========================================================================================#
     # Notes on notation:
@@ -123,7 +127,7 @@ def train_PG(exp_name='',
         sy_ac_na = tf.placeholder(shape=[None, ac_dim], name="ac", dtype=tf.float32) 
 
     # Define a placeholder for advantages
-    sy_adv_n = TODO
+    sy_adv_n = tf.placeholder(shape=[None], name="adv", dtype=tf.float32) #TODO
 
 
     #========================================================================================#
@@ -167,16 +171,24 @@ def train_PG(exp_name='',
 
     if discrete:
         # YOUR_CODE_HERE
-        sy_logits_na = TODO
-        sy_sampled_ac = TODO # Hint: Use the tf.multinomial op
-        sy_logprob_n = TODO
+        sy_logits_na = build_mlp(sy_ob_no, ac_dim, exp_name, output_activation=tf.nn.softmax)
+
+        sy_sampled_ac = tf.multinomial(sy_logits_na, 1)[:, 0]
+        sy_logprob_n = tf.log(tf.reduce_sum(sy_logits_na * tf.to_float(tf.one_hot(sy_ac_na, depth = 2)), axis=1))
 
     else:
         # YOUR_CODE_HERE
-        sy_mean = TODO
-        sy_logstd = TODO # logstd should just be a trainable variable, not a network output.
-        sy_sampled_ac = TODO
-        sy_logprob_n = TODO  # Hint: Use the log probability under a multivariate gaussian. 
+        sy_mean = build_mlp(sy_ob_no, ac_dim, exp_name, output_activation=None)
+        sy_log_std = tf.get_variable("log_std", initializer=tf.truncated_normal(shape=[ac_dim]))
+        #sy_mean= tf.Print(sy_mean, [sy_mean], "mean")
+        #sy_std= tf.Print(sy_std, [sy_std], "std")
+        z = tf.random_normal([ac_dim])
+        std = tf.exp(sy_log_std)
+        sy_sampled_ac = sy_mean + std * z
+        #sy_ac_na = tf.Print(sy_ac_na, [dist.prob(sy_sampled_ac)], "prob of sampled")
+        ln_det_v = tf.log(tf.reduce_prod(std)**2)
+        sy_logprob_n = -.5 * (ln_det_v + tf.reduce_sum(((sy_ac_na-sy_mean)/std)**2) + ac_dim * np.log(2 * np.pi))
+    #sy_logprob_n = tf.Print(sy_logprob_n, [tf.exp(sy_logprob_n)], "prob of actual")
 
 
 
@@ -184,8 +196,7 @@ def train_PG(exp_name='',
     #                           ----------SECTION 4----------
     # Loss Function and Training Operation
     #========================================================================================#
-
-    loss = TODO # Loss function that we'll differentiate to get the policy gradient.
+    loss = tf.reduce_mean(sy_logprob_n * -1 * sy_adv_n)
     update_op = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
 
@@ -317,7 +328,20 @@ def train_PG(exp_name='',
         #====================================================================================#
 
         # YOUR_CODE_HERE
-        q_n = TODO
+        if reward_to_go:
+            q_n = []
+            for path in paths:
+                curr_r = np.sum(path["reward"])
+                rewards = []
+                for r in path["reward"]:
+                    rewards.append(curr_r)
+                    curr_r -= r
+                q_n.extend(rewards)
+        else:
+            q_n = []
+            for path in paths:
+                r_sum = np.sum(path["reward"])
+                q_n.extend(np.repeat(r_sum, len(path["reward"])))
 
         #====================================================================================#
         #                           ----------SECTION 5----------
@@ -347,7 +371,8 @@ def train_PG(exp_name='',
             # On the next line, implement a trick which is known empirically to reduce variance
             # in policy gradient methods: normalize adv_n to have mean zero and std=1. 
             # YOUR_CODE_HERE
-            pass
+            adv_n = np.array(adv_n)
+            adv_n = (adv_n - adv_n.mean()) / adv_n.std()
 
 
         #====================================================================================#
@@ -380,7 +405,9 @@ def train_PG(exp_name='',
         # and after an update, and then log them below. 
 
         # YOUR_CODE_HERE
-
+        print("Before: ", loss.eval(feed_dict={sy_ob_no: ob_no, sy_ac_na: ac_na, sy_adv_n: adv_n}))
+        sess.run(update_op, feed_dict={sy_ob_no: ob_no, sy_ac_na: ac_na, sy_adv_n: adv_n})
+        print("After: ", loss.eval(feed_dict={sy_ob_no: ob_no, sy_ac_na: ac_na, sy_adv_n: adv_n}))
 
         # Log diagnostics
         returns = [path["reward"].sum() for path in paths]
@@ -433,7 +460,7 @@ def main():
         print('Running experiment with seed %d'%seed)
         def train_func():
             train_PG(
-                exp_name=args.exp_name,
+                exp_name=args.exp_name + str(e),
                 env_name=args.env_name,
                 n_iter=args.n_iter,
                 gamma=args.discount,
@@ -451,9 +478,10 @@ def main():
                 )
         # Awkward hacky process runs, because Tensorflow does not like
         # repeatedly calling train_PG in the same thread.
-        p = Process(target=train_func, args=tuple())
-        p.start()
-        p.join()
+        train_func()
+        # p = Process(target=train_func, args=tuple())
+        # p.start()
+        # p.join()
         
 
 if __name__ == "__main__":
